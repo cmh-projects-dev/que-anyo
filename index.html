@@ -124,7 +124,10 @@ p.lead{color:var(--muted);margin:0 0 28px;font-size:17px}
     <span class="chev">Cambiar ›</span>
   </button>
   <button class="btn big" id="scanBtn">Escanear tarjeta</button>
-  <button class="linkish" id="logoutBtn">Desconectar Spotify</button>
+  <div class="row" style="justify-content:center">
+    <button class="linkish" id="endBtn">Terminar partida</button>
+    <button class="linkish" id="logoutBtn">Desconectar Spotify</button>
+  </div>
 </section>
 
 <!-- Escáner -->
@@ -270,6 +273,10 @@ let device=null, devices=[];
 async function loadDevices(){
   const r=await api('GET','/me/player/devices');
   devices=r.ok ? ((await r.json()).devices||[]).filter(d=>!d.is_restricted) : [];
+  if(!devices.length){
+    // A veces el iPhone no sale en la lista pero sí como reproductor actual
+    try{ const p=await api('GET','/me/player'); if(p.status===200){ const d=(await p.json()).device; if(d && d.id && !d.is_restricted) devices=[d]; } }catch{}
+  }
   const saved=store.get('deviceId');
   device = devices.find(d=>d.id===saved) || devices.find(d=>d.is_active)
         || devices.find(d=>d.type==='Smartphone') || devices[0] || null;
@@ -319,7 +326,37 @@ function endClip(){
   stopClock(); clipLeft=0; paintClip(0); playing=false;
   if(current) current.ended=true;
   setPlayState('ended');
-  if(device) api('PUT','/me/player/pause',{query:{device_id:device.id}}).catch(()=>{});
+  hush();
+}
+/* ---------- Silencio entre tarjetas ----------
+   En iPhone, si Spotify se queda en pausa en segundo plano, iOS lo congela y desaparece.
+   Por eso, en vez de pausar, ponemos en bucle una pista de silencio. */
+async function findSilence(){
+  const saved=store.get('silence'); if(saved) return saved;
+  const good=t=>/silen(ce|cio)/i.test(t.name) && !/sound of|enjoy|sounds? of silence|remix|feat/i.test(t.name)
+    && (/\b(minutes?|minutos?|min|hours?|horas?|absolute|absoluto|pure|puro|total|complete|blank|empty|white)\b/i.test(t.name) || /^\s*(silence|silencio)\s*$/i.test(t.name))
+    && t.duration_ms>=60000;
+  let best=null;
+  for(const q of ['absolute silence','silence 10 minutes','silencio absoluto','silence']){
+    try{
+      const r=await api('GET','/search',{query:{q,type:'track',limit:'10',market:'from_token'}});
+      if(!r.ok) continue;
+      for(const t of ((await r.json()).tracks||{}).items||[]){
+        if(t && good(t) && (!best || t.duration_ms>best.duration_ms)) best=t;
+      }
+      if(best && best.duration_ms>=300000) break;
+    }catch{}
+  }
+  if(!best) return null;
+  const s={id:best.id, name:best.name+' · '+best.artists.map(a=>a.name).join(', ')};
+  store.set('silence',s); return s;
+}
+async function hush(){
+  if(!device) return;
+  const s=await findSilence().catch(()=>null);
+  let r=null;
+  if(s) r=await api('PUT','/me/player/play',{query:{device_id:device.id},body:{uris:['spotify:track:'+s.id],position_ms:0}}).catch(()=>null);
+  if(!r || !r.ok) api('PUT','/me/player/pause',{query:{device_id:device.id}}).catch(()=>{});
 }
 /* Punto de inicio estimado: el primer estribillo suele caer hacia el 28 % de la canción */
 function startOf(info){
@@ -330,9 +367,17 @@ async function trackInfo(id){
   try{ const r=await api('GET','/tracks/'+id,{query:{market:'from_token'}}); return r.ok ? await r.json() : null; }
   catch{ return null; }
 }
-function startPlayback(){
-  return api('PUT','/me/player/play',{query:{device_id:device.id},
-    body:{uris:['spotify:track:'+current.id], position_ms:current.start||0}});
+/* Pone el fragmento por donde iba (al empezar, en el punto de inicio) */
+async function startPlayback(){
+  const body={uris:['spotify:track:'+current.id], position_ms:(current.start||0)+(CLIP_MS-clipLeft)};
+  let r=await api('PUT','/me/player/play',{query:{device_id:device.id},body});
+  if(r.status===404){
+    await loadDevices().catch(()=>{});
+    if(device) r=await api('PUT','/me/player/play',{query:{device_id:device.id},body});
+    if(r.status===404) r=await api('PUT','/me/player/play',{body});   // último dispositivo que usó Spotify
+  }
+  if(r.ok) api('PUT','/me/player/repeat',{query:{state:'track'}}).catch(()=>{});
+  return r;
 }
 async function playTrack(id){
   stopClock();
@@ -344,9 +389,8 @@ async function playTrack(id){
     current.info=await trackInfo(id); current.start=startOf(current.info);
     if(!device || !devices.some(d=>d.id===device.id)) await loadDevices();
     if(!device){ return wake(id); }
-    let r=await startPlayback();
-    if(r.status===404){ await loadDevices(); if(!device) return wake(id); r=await startPlayback(); }
-    if(r.ok){ playing=true; setPlayState('playing'); startClock(); return; }
+    const r=await startPlayback();
+    if(r.ok){ playing=true; setPlayState('playing'); startClock(); findSilence().catch(()=>{}); return; }
     if(r.status===404) return wake(id);
     const e=await errorOf(r);
     if(e.reason==='PREMIUM_REQUIRED') toast('Para elegir canción hace falta Spotify Premium en esta cuenta.',6000);
@@ -364,9 +408,9 @@ async function retryPending(){
 async function togglePause(){
   if(!current || !device) return;
   if(current.ended) return restart();
-  const r = playing ? await api('PUT','/me/player/pause',{query:{device_id:device.id}})
-                    : await api('PUT','/me/player/play',{query:{device_id:device.id}});
-  if(r.ok){ playing=!playing; if(playing) startClock(); else stopClock(); setPlayState(playing?'playing':'paused'); }
+  if(playing){ stopClock(); playing=false; setPlayState('paused'); hush(); return; }
+  const r=await startPlayback();
+  if(r.ok){ playing=true; setPlayState('playing'); startClock(); }
   else if(r.status===404) wake(current.id);
 }
 async function restart(){
@@ -376,6 +420,7 @@ async function restart(){
   if(r.ok){ playing=true; setPlayState('playing'); startClock(); }
   else if(r.status===404) wake(current.id);
 }
+function stopAll(){ if(device) api('PUT','/me/player/pause',{query:{device_id:device.id}}).catch(()=>{}); }
 async function reveal(){
   if(!current) return;
   $('revealBtn').style.display='none';
@@ -391,7 +436,7 @@ async function reveal(){
 }
 async function next(){
   stopClock();
-  if(playing && device){ api('PUT','/me/player/pause',{query:{device_id:device.id}}).catch(()=>{}); playing=false; }
+  if(playing){ playing=false; hush(); }
   startScan();
 }
 
@@ -437,6 +482,7 @@ $('copyRedir').onclick=async()=>{ try{ await navigator.clipboard.writeText(REDIR
 $('loginBtn').onclick=login;
 $('logoutBtn').onclick=()=>{ store.del('token'); store.del('deviceId'); show('login'); };
 $('scanBtn').onclick=startScan;
+$('endBtn').onclick=()=>{ stopAll(); toast('Spotify en pausa. ¡Hasta la próxima!'); };
 $('cancelScan').onclick=()=>{ stopScan(); show('home'); };
 $('pauseBtn').onclick=togglePause;
 $('restartBtn').onclick=restart;
