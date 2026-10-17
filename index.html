@@ -453,7 +453,7 @@ let stream=null, scanning=false, lastBad='';
 function trackIdOf(text){ const m=/track[\/:]([A-Za-z0-9]{22})/.exec(text); return m&&m[1]; }
 /* Escaneo con la cámara de fotos del sistema: a diferencia de la cámara en directo,
    no corta el audio de Spotify en el iPhone */
-function startScan(){ $('photo').value=''; $('photo').click(); }
+function startPhotoScan(){ $('photo').value=''; $('photo').click(); }
 $('photo').onchange=async()=>{
   const f=$('photo').files && $('photo').files[0]; if(!f) return;
   let bmp;
@@ -476,7 +476,7 @@ $('photo').onchange=async()=>{
   }
   toast('No encuentro el QR en la foto. Acércate un poco más y prueba otra vez.',4500);
 };
-async function startLiveScan(){
+async function startScan(){
   show('scan');
   try{
     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
