@@ -486,10 +486,6 @@ $('photo').onchange=async()=>{
   toast('No encuentro el QR en la foto. Acércate un poco más y prueba otra vez.',4500);
 };
 async function startScan(){
-  /* Con la cámara en directo encendida, iOS manda el sonido al auricular (se oye bajito).
-     Pausamos Spotify antes y lo volvemos a lanzar cuando la cámara ya está apagada,
-     para que arranque de nuevo por el altavoz. */
-  stopAll();
   show('scan');
   try{
     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
@@ -515,7 +511,11 @@ function scanFrame(){
     const code=jsQR(img.data,size,size,{inversionAttempts:'attemptBoth'});
     if(code && code.data){
       const id=trackIdOf(code.data);
-      if(id){ stopScan(); playTrack(id, 800); return; }
+      /* Con la cámara encendida, iOS manda el sonido al auricular (se oye bajito).
+         Al leer el QR pausamos Spotify un instante y lo relanzamos ya sin cámara,
+         para que arranque de nuevo por el altavoz. La pausa es breve: si dura
+         mucho, iOS congela Spotify. */
+      if(id){ stopScan(); stopAll(); playTrack(id, 800); return; }
       if(code.data!==lastBad){ lastBad=code.data; toast('Ese QR no es una canción de Spotify.'); }
     }
   }
